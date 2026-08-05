@@ -1,0 +1,14 @@
+# 运行时生成
+config.json
+
+# 虚拟环境
+.venv/
+
+# 打包产物
+build/
+dist/
+*.spec
+
+# Python 缓存
+__pycache__/
+*.pyc
