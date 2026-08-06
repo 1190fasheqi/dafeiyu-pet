@@ -162,8 +162,7 @@ class PetWindow(QWidget):
 
         # 状态
         self.mode = self.cfg["mode"] if self.cfg["mode"] in ("wander", "follow", "still") else "wander"
-        self.dir = "down"              # down/up/left/right
-        self.facing = 1                # 1右 -1左
+        self.facing = 0                # 0右 1左 2上 3下
         self.target = None             # 行走目标点
         self.rest_until = 0            # 散步停顿到的时间戳
         self.cur_speed = 0.0           # 当前速度（惯性平滑用）
@@ -299,7 +298,7 @@ class PetWindow(QWidget):
             p.translate(cx, bottom)
             p.rotate(sway + act_rot)
             p.translate(-cx, -bottom)
-            if facing < 0:
+            if facing == 1:
                 p.translate(cx, 0)
                 p.scale(-1, 1)
                 p.translate(-cx, 0)
@@ -314,17 +313,15 @@ class PetWindow(QWidget):
             draw_one(cur_key, 1.0)
 
     def _sprite_key(self):
-        name = {"left": "侧面", "right": "侧面", "up": "背面", "down": "正面"}[self.dir]
-        return (name, self.cur_h, self.facing if self.dir in ("left", "right") else 1)
+        name = ["侧面", "侧面", "背面", "正面"][self.facing]
+        return (name, self.cur_h, self.facing)
 
-    def _set_dir(self, d, facing=None):
+    def _set_dir(self, facing=None):
         """切换朝向：视图变化时交叉淡化，左右翻转直接切"""
-        if d != self.dir:
-            self.prev_key = self._sprite_key()
-            self.cross_t = 1.0
-            self.dir = d
         if facing is not None and facing != self.facing:
             self.facing = facing
+            self.prev_key = self._sprite_key()
+            self.cross_t = 1.0
 
     # ---------- 逻辑 ----------
     def tick(self):
@@ -379,15 +376,15 @@ class PetWindow(QWidget):
             if dist < 12:
                 self.target = None
                 self.rest_until = self.t * TICK + random.randint(8000, 18000)
-                self._set_dir("down")
+                self._set_dir(3)
             else:
                 step = self.cur_speed * TICK / 1000.0
                 nx, ny = cx + dx / dist * step, cy + dy / dist * step
                 self.move(int(nx - self.width() / 2), int(ny - self.height() / 2))
                 if abs(dx) > abs(dy) * 1.15:
-                    self._set_dir("left" if dx < 0 else "right", -1 if dx < 0 else 1)
+                    self._set_dir(0 if dx < 0 else 1)
                 else:
-                    self._set_dir("up" if dy < 0 else "down")
+                    self._set_dir(2 if dy < 0 else 3)
             # 走路时偶尔蹦一下
             if random.random() < 0.002 and self.jump_t == 0:
                 self.jump_t = 0.5
@@ -449,14 +446,14 @@ class PetWindow(QWidget):
                 pos = e.globalPosition().toPoint() - self.drag_offset
                 self.move(pos)
                 if abs(delta.x()) > 10:
-                    self._set_dir("left" if delta.x() < 0 else "right")
+                    self._set_dir(1 if delta.x() < 0 else 1)
                 self.update()
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             if self.dragging:
                 self.dragging = False
-                self._set_dir("down")
+                self._set_dir(3)
                 # 拖完原地歇一阵，不往回走
                 self.target = None
                 self.rest_until = self.t * TICK + random.randint(6000, 14000)
