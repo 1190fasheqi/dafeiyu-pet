@@ -446,7 +446,7 @@ class PetWindow(QWidget):
                 pos = e.globalPosition().toPoint() - self.drag_offset
                 self.move(pos)
                 if abs(delta.x()) > 10:
-                    self._set_dir(1 if delta.x() < 0 else 1)
+                    self._set_dir(0 if delta.x() < 0 else 1)
                 self.update()
 
     def mouseReleaseEvent(self, e):
