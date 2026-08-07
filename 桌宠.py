@@ -133,14 +133,16 @@ class FoodPanel(QWidget):
 
 class PetWindow(QWidget):
     def __init__(self):
-        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
-                         | Qt.WindowType.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setWindowTitle("大肥鱼桌宠")
-
+        # 先加载配置，窗口置顶跟随 cfg（topmost=False 时重启不再强制置顶）
         self.cfg = load_json(CONFIG_PATH, {"mode": "wander", "size": 0.7, "topmost": True,
                                            "passthrough": False, "autostart": False,
                                            "x": None, "y": None})
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        if self.cfg.get("topmost", True):
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        super().__init__(None, flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowTitle("大肥鱼桌宠")
         # 精灵：{(名称, 高度): QPixmap}，优先加载预生成尺寸，缺了再运行时缩放
         self.sprites = {}
         for label, mult in SIZE_LEVELS.items():
@@ -198,13 +200,10 @@ class PetWindow(QWidget):
         # 喂食面板
         self.food_panel = FoodPanel(self.on_food)
 
-        # 托盘
+        # 托盘：菜单每次右键弹出前重建（与窗口右键共用 _build_menu，状态天然同步）
         self.tray = QSystemTrayIcon(self.icon, self)
-        tray_menu = QMenu()
-        tray_menu.addAction("显示/隐藏", self.toggle_visible)
-        tray_menu.addAction("退出", self.quit_app)
-        self.tray.setContextMenu(tray_menu)
-        self.tray.activated.connect(lambda r: self.toggle_visible() if r == QSystemTrayIcon.ActivationReason.Trigger else None)
+        self.tray.setContextMenu(self._build_menu())
+        self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
 
         # 初始位置
@@ -216,6 +215,9 @@ class PetWindow(QWidget):
         self.move(int(x), int(y))
         self.show()
         self.snap_into_screen()
+        # 启动时应用配置里的穿透（静默生效，不弹气泡）
+        if self.cfg.get("passthrough", False):
+            self._apply_passthrough(True)
 
     # ---------- 绘制 ----------
     def paintEvent(self, _):
@@ -385,7 +387,8 @@ class PetWindow(QWidget):
                 nx, ny = cx + dx / dist * step, cy + dy / dist * step
                 self.move(int(nx - self.width() / 2), int(ny - self.height() / 2))
                 if abs(dx) > abs(dy) * 1.15:
-                    self._set_dir("left" if dx < 0 else "right", -1 if dx < 0 else 1)
+                    # 素材鱼头朝左：向左走用原图(facing=1)，向右走镜像(facing=-1)
+                    self._set_dir("left" if dx < 0 else "right", 1 if dx < 0 else -1)
                 else:
                     self._set_dir("up" if dy < 0 else "down")
             # 走路时偶尔蹦一下
@@ -449,14 +452,15 @@ class PetWindow(QWidget):
                 pos = e.globalPosition().toPoint() - self.drag_offset
                 self.move(pos)
                 if abs(delta.x()) > 10:
-                    self._set_dir("left" if delta.x() < 0 else "right")
+                    # 拖拽同样修正朝向（原来漏传 facing，拖完会残留错误镜像）
+                    self._set_dir("left" if delta.x() < 0 else "right", 1 if delta.x() < 0 else -1)
                 self.update()
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             if self.dragging:
                 self.dragging = False
-                self._set_dir("down")
+                self._set_dir("down", 1)  # 回到正面并重置镜像，避免残留错误朝向
                 # 拖完原地歇一阵，不往回走
                 self.target = None
                 self.rest_until = self.t * TICK + random.randint(6000, 14000)
@@ -477,7 +481,8 @@ class PetWindow(QWidget):
         if random.random() < 0.6:
             self.say(random.choice(REACT_LINES))
 
-    def contextMenuEvent(self, e):
+    def _build_menu(self):
+        """构建完整菜单（窗口右键与托盘共用，每次现建现弹、读取最新配置）"""
         m = QMenu(self)
         mode_menu = m.addMenu("模式")
         for label, key in [("自由散步", "wander"), ("跟随鼠标", "follow"), ("原地待着", "still")]:
@@ -494,7 +499,7 @@ class PetWindow(QWidget):
         m.addAction("喂食", lambda: self.food_panel.popup_at(self.x() + self.width() / 2, self.y() + BUBBLE_H))
         m.addAction("说句话", lambda: self.say(random.choice(LINES)))
         m.addSeparator()
-        m.addAction("隐藏到托盘", self.hide)
+        m.addAction("显示/隐藏", self.toggle_visible)
         m.addAction("回到屏幕内", self.snap_into_screen)
         pa = m.addAction("鼠标穿透（点不到它）")
         pa.setCheckable(True)
@@ -510,7 +515,17 @@ class PetWindow(QWidget):
         aa.triggered.connect(lambda on: self.set_autostart(on))
         m.addSeparator()
         m.addAction("退出", self.quit_app)
-        m.exec(e.globalPos())
+        return m
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Context:
+            # 右键弹出前重建菜单，勾选状态与当前配置同步
+            self.tray.setContextMenu(self._build_menu())
+        elif reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.toggle_visible()
+
+    def contextMenuEvent(self, e):
+        self._build_menu().exec(e.globalPos())
 
     # ---------- 功能 ----------
     def set_mode(self, mode):
@@ -534,21 +549,27 @@ class PetWindow(QWidget):
         y = max(geo.top(), min(geo.bottom() - self.height(), self.y()))
         self.move(x, y)
 
-    def set_passthrough(self, on):
-        self.cfg["passthrough"] = bool(on)
+    def _apply_passthrough(self, on):
+        """直接修改窗口扩展样式（穿透静默生效，不弹气泡）"""
         hwnd = int(self.winId())
         GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT = -20, 0x80000, 0x20
         style = ctypes.windll.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        new_style = style | WS_EX_LAYERED | (WS_EX_TRANSPARENT if on else 0)
-        if not on:
-            new_style &= ~WS_EX_TRANSPARENT
-        ctypes.windll.user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style)
+        style = style | WS_EX_LAYERED
+        if on:
+            style |= WS_EX_TRANSPARENT
+        else:
+            style &= ~WS_EX_TRANSPARENT
+        ctypes.windll.user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
+
+    def set_passthrough(self, on):
+        self.cfg["passthrough"] = bool(on)
+        self._apply_passthrough(bool(on))
         if on:
             self.say("我隐身了！右键托盘图标解除～")
 
     def set_topmost(self, on):
         self.cfg["topmost"] = bool(on)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, bool(on))
         self.show()
 
     def set_autostart(self, on):
