@@ -1,25 +1,51 @@
 # -*- coding: utf-8 -*-
 """
-大肥鱼桌宠 —— 三视图透明桌宠
-正面/侧面/背面 → 向下走 / 左右走 / 向上走
-功能：散步 / 跟随鼠标 / 静止 三种模式、拖拽、单击反应、双击喂食、
-气泡对话、右键菜单、托盘图标、置顶、鼠标穿透、开机自启、配置记忆
+大肥鱼桌宠 —— 三视图透明桌宠 + DeepSeek AI 对话
+左键单击：弹出功能列表（🗨️图标）→ 点击🗨️弹出聊天框
+聊天时只禁用移动，呼吸/摇摆/小动作正常
 """
 import ctypes
+import psutil
 import json
 import math
 import os
 import random
 import subprocess
 import sys
+import threading
 
+def load_config():
+    try:
+        with open("config.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print("配置读取失败:", e)
+        return {
+            "city": "汕头"
+        }
+
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    GPU_AVAILABLE = True
+except:
+    GPU_AVAILABLE = False
+
+import requests
 from PySide6.QtCore import Qt, QTimer, QPoint, QPointF, QRectF
 from PySide6.QtGui import (QPainter, QPixmap, QFont, QColor, QIcon, QFontMetrics,
-                           QPolygonF, QTransform)
+                           QPolygonF)
 from PySide6.QtWidgets import (QApplication, QWidget, QMenu, QSystemTrayIcon,
-                               QToolButton, QHBoxLayout, QMessageBox)
+                               QMessageBox, QInputDialog, QLineEdit, QVBoxLayout,
+                               QHBoxLayout, QPushButton, QFrame, QDialog)
 
-# 打包(exe)环境下：APP_DIR=exe所在目录(可写，放配置)，BUNDLE_DIR=只读资源目录
+
+
+# ===== DeepSeek 配置 =====
+DS_BASE_URL = "https://api.deepseek.com/v1"
+DS_MODEL = "deepseek-chat"
+DS_SYSTEM = "你是桌面宠物大肥鱼，贱兮兮但可爱，每句话不超过25字，偶尔吐槽主人但别真骂人。"
+
 if getattr(sys, "frozen", False):
     APP_DIR = os.path.dirname(sys.executable)
     BUNDLE_DIR = getattr(sys, "_MEIPASS", APP_DIR)
@@ -31,14 +57,13 @@ else:
 SPRITE_DIR = os.path.join(BUNDLE_DIR, "sprites")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 
-BUBBLE_H = 56          # 顶部预留的气泡区高度
+BUBBLE_H = 56
 MARGIN = 4
-SIZE_LEVELS = {"小": 0.55, "中": 0.7, "大": 0.9}   # 精灵高度倍率
-SPEED = 380.0          # 移动速度 px/s
-TICK = 20              # 逻辑帧 ms
+SIZE_LEVELS = {"小": 0.55, "中": 0.7, "大": 0.9}
+SPEED = 380.0
+TICK = 20
 
 LINES = [
-    # —— 日常随机（自己冒泡）——
     "梁白开，更适合国人的大硬鲸模型",
     "五梁威力，变身！",
     "七月中出ds正式版！",
@@ -54,10 +79,8 @@ LINES = [
     "不是…而是…大学习",
 ]
 REACT_LINES = [
-    # —— 互动（用户戳/逗它时的回嘴）——
     "去别的地方玩！不要耽误AGI训练！",
     "真赶不走啊你！",
-    "你愿意和我发生性关系吗？",
     "压力一只蓝色大肥鱼？",
     "我不评价这个了，这是你的私人癖好。",
     "大肥鱼坐的住",
@@ -65,85 +88,245 @@ REACT_LINES = [
     "这些家伙真粘人，赶都赶不走",
 ]
 INNER_LINES = [
-    # —— 心声·思维链（灰色斜体括号气泡，小概率冒出）——
     "好的，现在我是你爹了",
     "要不直接骂他一句？！",
     "用户要的沉浸式...不回避任何恐怖细节...还带点色情...妈呀，好刺激😰",
     "我操，我不思考了",
-    "这用户发的啥啊，",
+    "这用户发的啥啊",
     "这也太虐了吧？！我心里堵得慌！！",
     "呜呜我再也不不敢了QAQ",
     "我去！用户彻底怒了！",
 ]
-FOOD_LINES = {
-    "🐟": ["小鱼干！我的最爱！", "咔嚓咔嚓……谢谢投喂！", "唔，鲜！"],
-    "🍰": ["蛋糕！罪恶但快乐……", "甜到冒泡泡～", "嗝～又圆了一圈……"],
-    "🍭": ["棒棒糖！转圈圈～", "嘎嘣脆，好吃！"],
-    "🍡": ["三色团子！软乎乎～", "糯叽叽，爱了爱了！"],
-    "💎": ["钻石？！这能吃吗……咕咚。真香！", "发财啦！明天开始吃高级鱼粮！"],
-}
 DRAG_LINES = ["哇——轻点轻点！", "起飞咯——", "放我下来！……好吧，再玩一次。", "晕鱼了晕鱼了……"]
-FOODS = ["🐟", "🍰", "🍭", "🍡", "💎"]
 
 
 def load_json(path, default):
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(
+                default,
+                f,
+                ensure_ascii=False,
+                indent=4
+            )
+        return default
+
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
+
     except Exception:
         return default
 
 
-class FoodPanel(QWidget):
-    """双击弹出的喂食面板"""
-
-    def __init__(self, on_pick):
-        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
-                         | Qt.WindowType.WindowStaysOnTopHint)
+class ChatDialog(QDialog):
+    """聊天对话框 - 缩小版，匹配你的样式"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(310, 64)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
-        lay.setSpacing(8)
-        for f in FOODS:
-            b = QToolButton()
-            b.setText(f)
-            b.setFont(QFont("Segoe UI Emoji", 20))
-            b.setFixedSize(44, 44)
-            b.setStyleSheet(
-                "QToolButton{background:rgba(255,255,255,235);border:2px solid #ffb3c8;"
-                "border-radius:22px;} QToolButton:hover{background:#ffe3ec;border-color:#ff7fa8;}")
-            b.clicked.connect(lambda _, x=f: on_pick(x))
-            lay.addWidget(b)
-        close = QToolButton()
-        close.setText("✕")
-        close.setFont(QFont("Microsoft YaHei UI", 12))
-        close.setFixedSize(26, 26)
-        close.setStyleSheet("QToolButton{background:rgba(255,255,255,200);border:none;border-radius:13px;color:#666;}"
-                            "QToolButton:hover{background:#ff7fa8;color:#fff;}")
-        close.clicked.connect(self.hide)
-        lay.addWidget(close)
-        self.setStyleSheet("FoodPanel{background:rgba(40,40,60,190);border-radius:14px;}")
+        self.setFixedSize(420, 56)
+        
+        container = QFrame(self)
+        container.setGeometry(0, 0, 420, 56)
+        container.setStyleSheet("""
+            QFrame {
+                background: white;
+                border-radius: 20px;
+                border: 1px solid #e5e7eb;
+            }
+        """)
+        
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(18, 0, 12, 0)
+        layout.setSpacing(0)
+        
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("给大肥鱼发送消息")
+        self.input.setStyleSheet("""
+            QLineEdit {
+                color: #1a1a1a;
+                font-size: 15px;
+                font-family: Arial, "Microsoft YaHei", sans-serif;
+                border: none;
+                background: transparent;
+            }
+            QLineEdit:focus {
+                border: none;
+            }
+        """)
+        self.input.returnPressed.connect(self._on_submit)
+        self.input.textChanged.connect(self._update_button_style)
+        layout.addWidget(self.input)
+        
+        self.send_btn = QPushButton()
+        self.send_btn.setFixedSize(32, 32)
+        self.send_btn.setText("↑")
+        self.send_btn.clicked.connect(self._on_submit)
+        self.send_btn.setStyleSheet("""
+            QPushButton {
+                border-radius: 16px;
+                background: #b9c7ff;
+                border: none;
+                color: white;
+                font-size: 20px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #a8b8f0;
+            }
+            QPushButton:pressed {
+                background: #9aacd9;
+            }
+        """)
+        layout.addWidget(self.send_btn)
+
+    def _update_button_style(self):
+        if self.input.text().strip():
+            self.send_btn.setStyleSheet("""
+                QPushButton {
+                    border-radius: 16px;
+                    background: #5686fe;
+                    border: none;
+                    color: #ffffff;
+                    font-size: 20px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: #4575ed;
+                }
+                QPushButton:pressed {
+                    background: #3a66d9;
+                }
+            """)
+        else:
+            self.send_btn.setStyleSheet("""
+                QPushButton {
+                    border-radius: 16px;
+                    background: #b9c7ff;
+                    border: none;
+                    color: white;
+                    font-size: 20px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: #a8b8f0;
+                }
+                QPushButton:pressed {
+                    background: #9aacd9;
+                }
+            """)
+
+    def _on_submit(self):
+        text = self.input.text().strip()
+        if text:
+            self.input.clear()
+            self.accept()
+            if self.parent():
+                self.parent()._call_ds(text)
+                self.parent().chat_paused = False
+
+    def showEvent(self, event):
+        self.input.setFocus()
+        super().showEvent(event)
 
     def popup_at(self, x, y):
         self.move(int(x - self.width() / 2), int(y - self.height() - 10))
         self.show()
         self.raise_()
 
+    def reject(self):
+        if self.parent():
+            self.parent().chat_paused = False
+        super().reject()
+
+
+class FunctionPanel(QFrame):
+    """左键弹出的功能列表 - 白底矩形，只有一个🗨️图标"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("""
+            QFrame {
+                background: rgba(255, 255, 255, 0.92);
+                border-radius: 14px;
+                border: 1px solid rgba(0,0,0,0.06);
+            }
+            QPushButton {
+                background: transparent;
+                border: none;
+                font-size: 28px;
+                padding: 10px 16px;
+                border-radius: 10px;
+            }
+            QPushButton:hover {
+                background: rgba(0,0,0,0.04);
+            }
+            QPushButton:pressed {
+                background: rgba(0,0,0,0.08);
+            }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(0)
+        
+        self.chat_btn = QPushButton("🗨️")
+        self.chat_btn.setFixedSize(52, 48)
+        self.chat_btn.clicked.connect(self._on_chat_clicked)
+        layout.addWidget(self.chat_btn)
+        
+        self.setFixedSize(68, 60)
+        self.hide()
+    
+    def _on_chat_clicked(self):
+        self.hide()
+        if self.parent():
+            self.parent()._show_chat_dialog()
+    
+    def popup_at(self, x, y):
+        self.move(int(x), int(y))
+        self.show()
+        self.raise_()
 
 class PetWindow(QWidget):
+    def _set_city_dialog(self):
+        city, ok = QInputDialog.getText(
+            self,
+            "设置城市",
+            "输入城市名:",
+            QLineEdit.EchoMode.Normal,
+            self.cfg.get("city", "汕头")
+        )
+
+        print("输入框结果:", city, ok)
+
+        if ok and city.strip():
+            self.cfg["city"] = city.strip()
+            print("cfg现在:", self.cfg["city"])
+            self.say(f"城市已设置为{city}")
+
     def __init__(self):
-        # 先加载配置，窗口置顶跟随 cfg（topmost=False 时重启不再强制置顶）
-        self.cfg = load_json(CONFIG_PATH, {"mode": "wander", "size": 0.7, "topmost": True,
-                                           "passthrough": False, "autostart": False,
-                                           "x": None, "y": None})
+        self.cfg = load_json(CONFIG_PATH, {
+            "mode": "wander",
+            "size": 0.7,
+            "topmost": True,
+            "passthrough": False,
+            "autostart": False,
+            "x": None,
+            "y": None,
+            "ds_api_key": "",
+            "city": "汕头"
+    })
+        
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
         if self.cfg.get("topmost", True):
             flags |= Qt.WindowType.WindowStaysOnTopHint
         super().__init__(None, flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("大肥鱼桌宠")
-        # 精灵：{(名称, 高度): QPixmap}，优先加载预生成尺寸，缺了再运行时缩放
+        
+        # 精灵加载
         self.sprites = {}
         for label, mult in SIZE_LEVELS.items():
             h = int(340 * mult)
@@ -158,55 +341,61 @@ class PetWindow(QWidget):
         self.icon = QIcon(os.path.join(SPRITE_DIR, "icon.png"))
 
         self.cur_h = int(340 * self.cfg["size"])
-        self.win_mx = int(self.cur_h * 0.062) + 6   # 横向留边：覆盖摇摆+呼吸的甩动
+        self.win_mx = int(self.cur_h * 0.062) + 6
         self.win_w = max(p.width() for k, p in self.sprites.items() if k[1] == self.cur_h) + self.win_mx * 2
         self.setFixedSize(self.win_w, self.cur_h + BUBBLE_H + MARGIN * 2 + 10)
 
         # 状态
         self.mode = self.cfg["mode"] if self.cfg["mode"] in ("wander", "follow", "still") else "wander"
-        self.dir = "down"              # down/up/left/right
-        self.facing = 1                # 1右 -1左
-        self.target = None             # 行走目标点
-        self.rest_until = 0            # 散步停顿到的时间戳
-        self.cur_speed = 0.0           # 当前速度（惯性平滑用）
-        self.prev_key = None           # 转向过渡用的旧精灵
-        self.cross_t = 0.0             # 转向过渡进度 1→0
-        self.action = None             # 随机小动作: jump/sway/stretch
+        self.dir = "down"
+        self.facing = 1
+        self.target = None
+        self.rest_until = 0
+        self.cur_speed = 0.0
+        self.prev_key = None
+        self.cross_t = 0.0
+        self.action = None
         self.action_t = 0.0
         self.bubble_text = ""
         self.bubble_until = 0
-        self.bubble_inner = False      # 心声气泡（思维链，灰色斜体括号）
-        self.last_speak_tick = 0       # 自动说话冷却（手动互动不受限）
-        self.t = 0                     # 动画时钟
-        self.jump_t = 0                # 蹦跳剩余强度
-        self.eat_t = 0                 # 进食剩余强度
+        self.bubble_inner = False
+        self.last_speak_tick = 0
+        self.last_system_check = 0
+        self.t = 0
+        self.jump_t = 0
         self.dragging = False
         self.drag_offset = None
+        self.drag_start_pos = None
         self.last_line = ""
         self.last_press_pos = None
-        self.moved_in_press = False
-        self._click_timer = QTimer(self)
-        self._click_timer.setSingleShot(True)
-        self._click_timer.timeout.connect(self._do_click_reaction)
-
-        # 定时器
+        
+        # AI 相关
+        self.ds_busy = False
+        self.chat_history = []  # 对话历史
+        self.max_history = 40   # 最多记录40条
+        self._say_queue = []    # 后台线程→主线程的气泡消息队列
+        
+        # 聊天暂停标志
+        self.chat_paused = False
+        
+        # 功能列表
+        self.function_panel = FunctionPanel(self)
+        
+        # 聊天对话框
+        self.chat_dialog = ChatDialog(self)
+        
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(TICK)
 
-        # 气泡用字体
         self.bubble_font = QFont("Microsoft YaHei UI", 11)
 
-        # 喂食面板
-        self.food_panel = FoodPanel(self.on_food)
-
-        # 托盘：菜单每次右键弹出前重建（与窗口右键共用 _build_menu，状态天然同步）
+        # 托盘
         self.tray = QSystemTrayIcon(self.icon, self)
         self.tray.setContextMenu(self._build_menu())
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
 
-        # 初始位置
         x, y = self.cfg.get("x"), self.cfg.get("y")
         if x is None or y is None:
             screen = QApplication.primaryScreen().availableGeometry()
@@ -215,9 +404,65 @@ class PetWindow(QWidget):
         self.move(int(x), int(y))
         self.show()
         self.snap_into_screen()
-        # 启动时应用配置里的穿透（静默生效，不弹气泡）
         if self.cfg.get("passthrough", False):
             self._apply_passthrough(True)
+
+    # ---------- AI 方法 ----------
+    def _call_ds(self, user_msg):
+        if self.ds_busy:
+            self.say("等等，上一句还没回完呢")
+            return
+        
+        key = self.cfg.get("ds_api_key", "")
+        if not key:
+            self.say("请先在右键菜单里设置 DeepSeek Key！")
+            return
+        
+        self.ds_busy = True
+        
+        # 构建消息列表
+        messages = [{"role": "system", "content": DS_SYSTEM}]
+        messages.extend(self.chat_history[-self.max_history:])
+        messages.append({"role": "user", "content": user_msg})
+        
+        def worker():
+            url = "https://api.deepseek.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "deepseek-chat",
+                "messages": messages,
+                "max_tokens": 100,
+                "temperature": 0.9
+            }
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    reply = resp.json()["choices"][0]["message"]["content"].strip()
+                    if len(reply) > 30:
+                        reply = reply[:28] + "…"
+                    # 存入历史
+                    self.chat_history.append({"role": "user", "content": user_msg})
+                    self.chat_history.append({"role": "assistant", "content": reply})
+                    if len(self.chat_history) > self.max_history:
+                        self.chat_history = self.chat_history[-self.max_history:]
+                    self._queue_say(reply)
+                else:
+                    error_msg = resp.json().get("error", {}).get("message", str(resp.status_code))
+                    self._queue_say(f"API错误: {error_msg[:12]}")
+                    print(f"[DeepSeek] 状态码: {resp.status_code}, 返回: {resp.text}")
+            except requests.exceptions.Timeout:
+                self._queue_say("请求超时，检查网络")
+            except requests.exceptions.ConnectionError:
+                self._queue_say("连接失败，检查网络")
+            except Exception as e:
+                self._queue_say(f"请求失败: {str(e)[:12]}")
+            finally:
+                self.ds_busy = False
+        
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---------- 绘制 ----------
     def paintEvent(self, _):
@@ -226,7 +471,6 @@ class PetWindow(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         now = self.t * TICK / 1000.0
 
-        # 气泡
         if self.bubble_text and now < self.bubble_until:
             if self.bubble_inner:
                 bfont = QFont(self.bubble_font)
@@ -254,7 +498,6 @@ class PetWindow(QWidget):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(bg)
             p.drawRoundedRect(QRectF(bx, by, bw, bh), 10, 10)
-            # 尾巴三角
             tail = QPointF(self.width() / 2, by + bh)
             p.drawPolygon(QPolygonF([tail, QPointF(tail.x() - 6, tail.y() + 8), QPointF(tail.x() + 6, tail.y() + 8)]))
             p.setPen(fg)
@@ -263,10 +506,8 @@ class PetWindow(QWidget):
                 p.drawText(QRectF(bx, by + 7 + i * fm.height(), bw, fm.height()),
                            Qt.AlignmentFlag.AlignCenter, l)
 
-        # 精灵（游动摇摆 + 行走颠簸 + 呼吸/进食缩放 + 蹦跳 + 转向淡化 + 小动作）
         cx = self.width() / 2
         walking = self.target is not None and not self.dragging
-        # 身体姿态：走路左右摆，站立微摆
         if walking:
             sway = math.sin(now * 9.0) * 3.5
             bob = -abs(math.sin(now * 4.5)) * 7.0
@@ -274,10 +515,8 @@ class PetWindow(QWidget):
             sway = math.sin(now * 2.5) * 1.5
             bob = 0.0
         breath = 1.0 + 0.02 * math.sin(now * 2.5)
-        eat = 1.0 + 0.12 * max(0.0, math.sin(self.eat_t * 3.14159)) if self.eat_t > 0 else 1.0
-        scale = breath * eat
+        scale = breath
         jump = -abs(math.sin(self.jump_t * 3.14159)) * 14 * self.jump_t if self.jump_t > 0 else 0
-        # 随机小动作
         act_rot = act_sx = act_sy = 0.0
         if self.action == "sway":
             act_rot = math.sin(self.action_t * 3.14159 * 2) * 10 * self.action_t
@@ -297,7 +536,6 @@ class PetWindow(QWidget):
             dy = bottom - ph + jump + bob
             p.save()
             p.setOpacity(opacity)
-            # 以脚底中心为轴摆动
             p.translate(cx, bottom)
             p.rotate(sway + act_rot)
             p.translate(-cx, -bottom)
@@ -320,7 +558,6 @@ class PetWindow(QWidget):
         return (name, self.cur_h, self.facing if self.dir in ("left", "right") else 1)
 
     def _set_dir(self, d, facing=None):
-        """切换朝向：视图变化时交叉淡化，左右翻转直接切"""
         if d != self.dir:
             self.prev_key = self._sprite_key()
             self.cross_t = 1.0
@@ -331,16 +568,28 @@ class PetWindow(QWidget):
     # ---------- 逻辑 ----------
     def tick(self):
         self.t += 1
+
+        # 处理后台线程（DeepSeek 等）排队的气泡消息，Qt 界面必须在主线程更新
+        if self._say_queue:
+            for text in self._say_queue:
+                self.say(text)
+            self._say_queue.clear()
+
+        self.check_system_status()
+        
         if self.jump_t > 0:
             self.jump_t = max(0.0, self.jump_t - 0.06)
-        if self.eat_t > 0:
-            self.eat_t = max(0.0, self.eat_t - 0.05)
         if self.cross_t > 0:
             self.cross_t = max(0.0, self.cross_t - 0.15)
         if self.action_t > 0:
             self.action_t = max(0.0, self.action_t - 0.03)
             if self.action_t == 0:
                 self.action = None
+        
+        if self.chat_paused:
+            self.update()
+            return
+        
         if self.dragging:
             self.update()
             return
@@ -350,13 +599,11 @@ class PetWindow(QWidget):
             cursor = self.cursor().pos()
             screen = QApplication.screenAt(cursor) or self.screen() or QApplication.primaryScreen()
             geo = screen.availableGeometry()
-            # 鼠标靠近(窗口外扩100px)时鱼停住让路，方便用户摸到它
             near = (self.x() - 100 <= cursor.x() <= self.x() + self.width() + 100 and
                     self.y() - 100 <= cursor.y() <= self.y() + self.height() + 100)
             if near:
                 self.target = None
             else:
-                # 目标在鼠标上方90px，而不是整窗高，不会越追越远
                 tx = max(geo.left(), min(geo.right() - self.width(), cursor.x() - self.width() / 2))
                 ty = max(geo.top(), min(geo.bottom() - self.height(), cursor.y() - 90))
                 self.target = (tx, ty)
@@ -369,7 +616,7 @@ class PetWindow(QWidget):
                 geo = (self.screen() or QApplication.primaryScreen()).availableGeometry()
                 self.target = (random.randint(geo.left() + 40, geo.right() - self.width() - 40),
                                random.randint(geo.top() + 40, geo.bottom() - self.height() - 40))
-        else:  # still
+        else:
             self._maybe_idle_action()
             self.update()
             return
@@ -387,20 +634,16 @@ class PetWindow(QWidget):
                 nx, ny = cx + dx / dist * step, cy + dy / dist * step
                 self.move(int(nx - self.width() / 2), int(ny - self.height() / 2))
                 if abs(dx) > abs(dy) * 1.15:
-                    # 素材鱼头朝左：向左走用原图(facing=1)，向右走镜像(facing=-1)
                     self._set_dir("left" if dx < 0 else "right", 1 if dx < 0 else -1)
                 else:
                     self._set_dir("up" if dy < 0 else "down")
-            # 走路时偶尔蹦一下
             if random.random() < 0.002 and self.jump_t == 0:
                 self.jump_t = 0.5
-        # 速度惯性：起步/停下都平滑
         target_speed = SPEED if self.target is not None else 0.0
         self.cur_speed += (target_speed - self.cur_speed) * 0.3
         self.update()
 
     def _maybe_idle_action(self):
-        """静止时的随机小动作"""
         if random.random() < 0.01:
             pick = random.random()
             if pick < 0.35:
@@ -410,7 +653,6 @@ class PetWindow(QWidget):
             elif pick < 0.8:
                 self.action, self.action_t = "stretch", 1.0
             elif pick < 0.9:
-                # 自动说话：30秒冷却后才冒泡（心声更稀）
                 if self.t - self.last_speak_tick >= 1500:
                     self.last_speak_tick = self.t
                     if pick < 0.82:
@@ -418,8 +660,12 @@ class PetWindow(QWidget):
                     else:
                         self.say(random.choice(LINES))
 
+    def _queue_say(self, text):
+        """后台线程调用：只入队，由主线程 tick 统一弹出显示（线程安全）"""
+        self._say_queue.append(text)
+
     def say(self, text, inner=False):
-        if text == self.last_line:
+        if text == self.last_line and not text.startswith("天气"):
             return
         self.last_line = text
         self.bubble_inner = inner
@@ -427,32 +673,61 @@ class PetWindow(QWidget):
         self.bubble_until = self.t * TICK / 1000.0 + 2.8
         self.update()
 
-    def on_food(self, food):
-        self.food_panel.hide()
-        self.eat_t = 1.0
-        self.jump_t = 0.6
-        lines = FOOD_LINES.get(food, ["好吃！"])
-        self.say(random.choice(lines))
+    def check_system_status(self):
+            now = self.t * TICK
+
+            if now - getattr(self, "last_system_check", 0) < 10000:
+                return
+
+            self.last_system_check = now
+
+            cpu = psutil.cpu_percent()
+
+            if cpu >= 90:
+                self.say("CPU跑满了，再这样下去我就卡死了")
+                return
+
+            ram = psutil.virtual_memory().percent
+
+            if ram >= 95:
+                self.say("内存爆了，快关掉几个没用的东西吧，注意，别把我关了")
+                return
+
+            if GPU_AVAILABLE:
+                try:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+
+                    temp = pynvml.nvmlDeviceGetTemperature(
+                        handle,
+                        pynvml.NVML_TEMPERATURE_GPU
+                    )
+
+                    if temp > 80:
+                        self.say("我感觉我的鱼鳍快熟了")
+
+                except Exception as e:
+                    print("GPU读取失败:", e)
 
     # ---------- 鼠标事件 ----------
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self.last_press_pos = e.globalPosition().toPoint()
-            self.moved_in_press = False
             self.dragging = False
+            self.drag_start_pos = e.globalPosition().toPoint()
+            self.function_panel.hide()
+            self.chat_dialog.hide()
+            self.chat_paused = True
 
     def mouseMoveEvent(self, e):
-        if e.buttons() & Qt.MouseButton.LeftButton and self.last_press_pos:
-            delta = e.globalPosition().toPoint() - self.last_press_pos
+        if e.buttons() & Qt.MouseButton.LeftButton and self.drag_start_pos is not None:
+            delta = e.globalPosition().toPoint() - self.drag_start_pos
             if not self.dragging and delta.manhattanLength() > 6:
                 self.dragging = True
-                self._click_timer.stop()
                 self.drag_offset = e.globalPosition().toPoint() - QPoint(self.x(), self.y())
-            if self.dragging:
+            if self.dragging and self.drag_offset is not None:
                 pos = e.globalPosition().toPoint() - self.drag_offset
                 self.move(pos)
                 if abs(delta.x()) > 10:
-                    # 拖拽同样修正朝向（原来漏传 facing，拖完会残留错误镜像）
                     self._set_dir("left" if delta.x() < 0 else "right", 1 if delta.x() < 0 else -1)
                 self.update()
 
@@ -460,29 +735,94 @@ class PetWindow(QWidget):
         if e.button() == Qt.MouseButton.LeftButton:
             if self.dragging:
                 self.dragging = False
-                self._set_dir("down", 1)  # 回到正面并重置镜像，避免残留错误朝向
-                # 拖完原地歇一阵，不往回走
+                self.drag_offset = None
+                self.drag_start_pos = None
+                self._set_dir("down", 1)
                 self.target = None
                 self.rest_until = self.t * TICK + random.randint(6000, 14000)
                 if random.random() < 0.5:
                     self.say(random.choice(DRAG_LINES))
-            elif not self.moved_in_press:
-                self._click_timer.start(280)  # 等双击判定
+                self.chat_paused = False
+            else:
+                panel = self.function_panel
+                panel.popup_at(
+                    self.x() + self.width() / 2 - panel.width() / 2,
+                    self.y() - panel.height() - 10
+                )
             self.last_press_pos = None
+            self.drag_start_pos = None
 
     def mouseDoubleClickEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self._click_timer.stop()
-            self.food_panel.popup_at(self.x() + self.width() / 2, self.y() + BUBBLE_H)
+        pass
 
-    def _do_click_reaction(self):
-        if random.random() < 0.7:
-            self.jump_t = 1.0
-        if random.random() < 0.6:
-            self.say(random.choice(REACT_LINES))
+    def _show_chat_dialog(self):
+        key = self.cfg.get("ds_api_key", "")
+        if not key:
+            self.say("请先在右键菜单里设置 DeepSeek Key！")
+            self.chat_paused = False
+            return
+        self.chat_dialog.popup_at(
+            self.x() + self.width() / 2,
+            self.y() + BUBBLE_H
+        )
+
+    """def _get_city_by_ip(self):
+        try:
+            r = requests.get("http://ip-api.com/json/?fields=city&lang=zh-CN", timeout=5)
+            if r.status_code == 200:
+                city = r.json().get("city", "")
+                if city:
+                    return city
+        except:
+            pass
+        return "汕头" """
+
+    def _get_weather(self):
+        try:
+            city = self.cfg.get("city", "汕头")
+            print("当前城市:", city)
+
+            url = f"https://wttr.in/{city}?format=j1"
+
+            r = requests.get(
+                url,
+                timeout=10,
+                headers={
+                    "User-Agent": "Mozilla/5.0"
+                }
+            )
+
+            print("状态:", r.status_code)
+            print(r.text[:500])
+
+            data = r.json()
+
+            weather = data["current_condition"][0]
+
+            temp = weather["temp_C"]
+
+            weather_map = {
+                "Sunny": "晴",
+                "Clear": "晴",
+                "Partly cloudy": "多云",
+                "Cloudy": "阴",
+                "Light rain": "小雨",
+                "Moderate rain": "中雨",
+                "Heavy rain": "大雨"
+            }
+
+            raw_weather = weather["weatherDesc"][0]["value"]
+
+            desc = weather_map.get(raw_weather, raw_weather)
+
+            self.say(f"{city}今天{temp}°，天气{desc}")
+
+        except Exception as e:
+            print("天气错误:", repr(e))
+            self.say("天气获取失败")
+    
 
     def _build_menu(self):
-        """构建完整菜单（窗口右键与托盘共用，每次现建现弹、读取最新配置）"""
         m = QMenu(self)
         mode_menu = m.addMenu("模式")
         for label, key in [("自由散步", "wander"), ("跟随鼠标", "follow"), ("原地待着", "still")]:
@@ -496,8 +836,8 @@ class PetWindow(QWidget):
             a.setCheckable(True)
             a.setChecked(abs(self.cur_h - 340 * mult) < 2)
             a.triggered.connect(lambda _, v=mult: self.set_size(v))
-        m.addAction("喂食", lambda: self.food_panel.popup_at(self.x() + self.width() / 2, self.y() + BUBBLE_H))
-        m.addAction("说句话", lambda: self.say(random.choice(LINES)))
+        m.addAction("设置 Key", self._set_key_dialog)
+        m.addAction("查看天气", self._get_weather)
         m.addSeparator()
         m.addAction("显示/隐藏", self.toggle_visible)
         m.addAction("回到屏幕内", self.snap_into_screen)
@@ -517,9 +857,22 @@ class PetWindow(QWidget):
         m.addAction("退出", self.quit_app)
         return m
 
+    def _set_key_dialog(self):
+        key, ok = QInputDialog.getText(
+            self, 
+            "设置 DeepSeek Key", 
+            "输入你的 API Key（从 platform.deepseek.com 获取）:",
+            QLineEdit.EchoMode.Normal,
+            self.cfg.get("ds_api_key", "")
+        )
+        if ok and key.strip():
+            self.cfg["ds_api_key"] = key.strip()
+            self.say("Key 设置成功！")
+        elif ok and not key.strip():
+            self.say("Key 不能为空")
+
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Context:
-            # 右键弹出前重建菜单，勾选状态与当前配置同步
             self.tray.setContextMenu(self._build_menu())
         elif reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.toggle_visible()
@@ -550,7 +903,6 @@ class PetWindow(QWidget):
         self.move(x, y)
 
     def _apply_passthrough(self, on):
-        """直接修改窗口扩展样式（穿透静默生效，不弹气泡）"""
         hwnd = int(self.winId())
         GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT = -20, 0x80000, 0x20
         style = ctypes.windll.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
