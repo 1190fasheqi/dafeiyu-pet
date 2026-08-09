@@ -1,0 +1,12 @@
+{
+  "mode": "wander",
+  "size": 0.7,
+  "topmost": true,
+  "passthrough": false,
+  "autostart": false,
+  "x": -862,
+  "y": 498,
+  "ds_api_key": "",
+  "_comment": "city输入城市名，用来定位天气，不自动定位是因为考虑到大多数人都有用vpn的需求，所以使用手动更妥当",
+  "city": "汕头"
+}
