@@ -87,6 +87,15 @@ pyinstaller --noconfirm --onefile --windowed --name 大肥鱼桌宠 --add-data "
 | sprites/ | 精灵图（正面/侧面/背面 各尺寸 + 图标） |
 | 启动桌宠.bat | 启动脚本（自动选择 venv 或系统 Python） |
 | requirements.txt | 依赖 |
+| 桌宠.spec | PyInstaller 打包配置（含新依赖收集） |
+
+## 贡献与致谢
+
+- **AI 对话 / 天气查询 / 系统监控 / PyInstaller 打包配置**：由 [Cpanoe](https://github.com/Cpanoe) 通过 [PR#3](https://github.com/1190fasheqi/dafeiyu-pet/pull/3) 贡献（DeepSeek API 聊天、wttr.in 天气、CPU/内存/GPU 监控、桌宠.spec）。
+- 合并时维护方修复：
+  - 线程安全：DeepSeek 回复由后台线程直接调用 Qt 界面改为经队列转发主线程（`_say_queue`）
+  - 配置保护：`config.json` 保持不入仓库（本地配置含 API Key，防止泄露）
+- 桌面宠物朝向修复由 [B-A-A-GE](https://github.com/B-A-A-GE) 通过 [PR#1](https://github.com/1190fasheqi/dafeiyu-pet/pull/1) 提交（未合并，当前为维护方修复版）。
 
 ## 台词梗来源
 
