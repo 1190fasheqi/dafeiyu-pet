@@ -37,7 +37,7 @@ from PySide6.QtGui import (QPainter, QPixmap, QFont, QColor, QIcon, QFontMetrics
                            QPolygonF)
 from PySide6.QtWidgets import (QApplication, QWidget, QMenu, QSystemTrayIcon,
                                QMessageBox, QInputDialog, QLineEdit, QVBoxLayout,
-                               QHBoxLayout, QPushButton, QFrame, QDialog)
+                               QHBoxLayout, QPushButton, QFrame, QDialog, QToolButton)
 
 
 
@@ -81,6 +81,7 @@ LINES = [
 REACT_LINES = [
     "去别的地方玩！不要耽误AGI训练！",
     "真赶不走啊你！",
+    "你愿意和我发生性关系吗？",
     "压力一只蓝色大肥鱼？",
     "我不评价这个了，这是你的私人癖好。",
     "大肥鱼坐的住",
@@ -92,12 +93,20 @@ INNER_LINES = [
     "要不直接骂他一句？！",
     "用户要的沉浸式...不回避任何恐怖细节...还带点色情...妈呀，好刺激😰",
     "我操，我不思考了",
-    "这用户发的啥啊",
+    "这用户发的啥啊，",
     "这也太虐了吧？！我心里堵得慌！！",
     "呜呜我再也不不敢了QAQ",
     "我去！用户彻底怒了！",
 ]
 DRAG_LINES = ["哇——轻点轻点！", "起飞咯——", "放我下来！……好吧，再玩一次。", "晕鱼了晕鱼了……"]
+FOOD_LINES = {
+    "🐟": ["小鱼干！我的最爱！", "咔嚓咔嚓……谢谢投喂！", "唔，鲜！"],
+    "🍰": ["蛋糕！罪恶但快乐……", "甜到冒泡泡～", "嗝～又圆了一圈……"],
+    "🍭": ["棒棒糖！转圈圈～", "嘎嘣脆，好吃！"],
+    "🍡": ["三色团子！软乎乎～", "糯叽叽，爱了爱了！"],
+    "💎": ["钻石？！这能吃吗……咕咚。真香！", "发财啦！明天开始吃高级鱼粮！"],
+}
+FOODS = ["🐟", "🍰", "🍭", "🍡", "💎"]
 
 
 def load_json(path, default):
@@ -289,6 +298,42 @@ class FunctionPanel(QFrame):
         self.show()
         self.raise_()
 
+class FoodPanel(QWidget):
+    """双击弹出的喂食面板"""
+
+    def __init__(self, on_pick):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+                         | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(310, 64)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(8)
+        for f in FOODS:
+            b = QToolButton()
+            b.setText(f)
+            b.setFont(QFont("Segoe UI Emoji", 20))
+            b.setFixedSize(44, 44)
+            b.setStyleSheet(
+                "QToolButton{background:rgba(255,255,255,235);border:2px solid #ffb3c8;"
+                "border-radius:22px;} QToolButton:hover{background:#ffe3ec;border-color:#ff7fa8;}")
+            b.clicked.connect(lambda _, x=f: on_pick(x))
+            lay.addWidget(b)
+        close = QToolButton()
+        close.setText("✕")
+        close.setFont(QFont("Microsoft YaHei UI", 12))
+        close.setFixedSize(26, 26)
+        close.setStyleSheet("QToolButton{background:rgba(255,255,255,200);border:none;border-radius:13px;color:#666;}"
+                            "QToolButton:hover{background:#ff7fa8;color:#fff;}")
+        close.clicked.connect(self.hide)
+        lay.addWidget(close)
+        self.setStyleSheet("FoodPanel{background:rgba(40,40,60,190);border-radius:14px;}")
+
+    def popup_at(self, x, y):
+        self.move(int(x - self.width() / 2), int(y - self.height() - 10))
+        self.show()
+        self.raise_()
+
 class PetWindow(QWidget):
     def _set_city_dialog(self):
         city, ok = QInputDialog.getText(
@@ -380,6 +425,11 @@ class PetWindow(QWidget):
         
         # 功能列表
         self.function_panel = FunctionPanel(self)
+        self.food_panel = FoodPanel(self.on_food)
+        # 单击延迟判定（等双击）：单击=回嘴+弹聊天面板，双击=喂食
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.timeout.connect(self._on_single_click)
         
         # 聊天对话框
         self.chat_dialog = ChatDialog(self)
@@ -744,16 +794,31 @@ class PetWindow(QWidget):
                     self.say(random.choice(DRAG_LINES))
                 self.chat_paused = False
             else:
-                panel = self.function_panel
-                panel.popup_at(
-                    self.x() + self.width() / 2 - panel.width() / 2,
-                    self.y() - panel.height() - 10
-                )
+                self._click_timer.start(280)  # 等双击判定；单击则回嘴+弹聊天面板
             self.last_press_pos = None
             self.drag_start_pos = None
 
     def mouseDoubleClickEvent(self, e):
-        pass
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._click_timer.stop()
+            self.food_panel.popup_at(self.x() + self.width() / 2, self.y() + BUBBLE_H)
+
+    def _on_single_click(self):
+        """单击：蹦跳回嘴 + 弹聊天面板（两不误，不想聊点鱼身外关闭）"""
+        if random.random() < 0.7:
+            self.jump_t = 1.0
+        if random.random() < 0.6:
+            self.say(random.choice(REACT_LINES))
+        panel = self.function_panel
+        panel.popup_at(self.x() + self.width() / 2 - panel.width() / 2,
+                       self.y() - panel.height() - 10)
+
+    def on_food(self, food):
+        self.food_panel.hide()
+        self.eat_t = 1.0
+        self.jump_t = 0.6
+        lines = FOOD_LINES.get(food, ["好吃！"])
+        self.say(random.choice(lines))
 
     def _show_chat_dialog(self):
         key = self.cfg.get("ds_api_key", "")
