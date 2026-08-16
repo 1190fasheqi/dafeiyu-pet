@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 大肥鱼桌宠 —— 三视图透明桌宠 + DeepSeek AI 对话
-左键单击：弹出功能列表（🗨️图标）→ 点击🗨️弹出聊天框
+左键单击：气泡回嘴 + 气泡旁弹出聊天小圆钮 → 点击圆钮弹出聊天框
 聊天时只禁用移动，呼吸/摇摆/小动作正常
 """
 import ctypes
@@ -32,9 +32,9 @@ except:
     GPU_AVAILABLE = False
 
 import requests
-from PySide6.QtCore import Qt, QTimer, QPoint, QPointF, QRectF
+from PySide6.QtCore import Qt, QTimer, QPoint, QPointF, QRectF, QEvent
 from PySide6.QtGui import (QPainter, QPixmap, QFont, QColor, QIcon, QFontMetrics,
-                           QPolygonF)
+                           QPolygonF, QCursor, QPen, QPainterPath)
 from PySide6.QtWidgets import (QApplication, QWidget, QMenu, QSystemTrayIcon,
                                QMessageBox, QInputDialog, QLineEdit, QVBoxLayout,
                                QHBoxLayout, QPushButton, QFrame, QDialog, QToolButton)
@@ -54,6 +54,9 @@ else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
     BUNDLE_DIR = APP_DIR
     PYTHONW = os.path.join(APP_DIR, ".venv", "Scripts", "pythonw.exe")
+    if not os.path.exists(PYTHONW):
+        # 无 .venv 时回退到当前解释器同目录的 pythonw.exe（全局 Python）
+        PYTHONW = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
 SPRITE_DIR = os.path.join(BUNDLE_DIR, "sprites")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 
@@ -134,6 +137,10 @@ class ChatDialog(QDialog):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(420, 56)
+        # 失去鼠标焦点 5 秒后自动消失，桌宠恢复自动运行
+        self._focus_hide_timer = QTimer(self)
+        self._focus_hide_timer.setSingleShot(True)
+        self._focus_hide_timer.timeout.connect(self.hide)
         
         container = QFrame(self)
         container.setGeometry(0, 0, 420, 56)
@@ -239,9 +246,33 @@ class ChatDialog(QDialog):
         super().showEvent(event)
 
     def popup_at(self, x, y):
-        self.move(int(x - self.width() / 2), int(y - self.height() - 10))
+        screen = QApplication.screenAt(QPoint(int(x), int(y))) or QApplication.primaryScreen()
+        ag = screen.availableGeometry()
+        px = max(ag.left(), min(int(x - self.width() / 2), ag.right() - self.width()))
+        py = max(ag.top(), min(int(y - self.height() - 10), ag.bottom() - self.height()))
+        self.move(px, py)
         self.show()
         self.raise_()
+        # 确保输入框所在窗口被激活并获得焦点，可直接打字
+        self.activateWindow()
+        self.input.setFocus()
+        QTimer.singleShot(0, self.input.setFocus)
+        self._focus_hide_timer.stop()  # 弹出时重置失焦计时
+
+    def event(self, e):
+        # 失去鼠标焦点（点击窗口外）→ 5 秒后自动消失
+        if e.type() == QEvent.Type.WindowDeactivate:
+            self._focus_hide_timer.start(5000)
+        elif e.type() == QEvent.Type.WindowActivate:
+            self._focus_hide_timer.stop()
+        return super().event(e)
+
+    def hideEvent(self, e):
+        """对话框隐藏（含自动消失）后，桌宠恢复自动运行状态"""
+        self._focus_hide_timer.stop()
+        if self.parent() is not None:
+            self.parent().chat_paused = False
+        super().hideEvent(e)
 
     def reject(self):
         if self.parent():
@@ -249,53 +280,97 @@ class ChatDialog(QDialog):
         super().reject()
 
 
-class FunctionPanel(QFrame):
-    """左键弹出的功能列表 - 白底矩形，只有一个🗨️图标"""
+class ChatButton(QFrame):
+    """气泡旁的聊天入口小圆钮：矢量聊天图标，3 秒无交互自动隐藏"""
+    BTN = 40  # 按钮边长
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setStyleSheet("""
-            QFrame {
-                background: rgba(255, 255, 255, 0.92);
-                border-radius: 14px;
-                border: 1px solid rgba(0,0,0,0.06);
-            }
-            QPushButton {
-                background: transparent;
-                border: none;
-                font-size: 28px;
-                padding: 10px 16px;
-                border-radius: 10px;
-            }
-            QPushButton:hover {
-                background: rgba(0,0,0,0.04);
-            }
-            QPushButton:pressed {
-                background: rgba(0,0,0,0.08);
-            }
-        """)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(0)
-        
-        self.chat_btn = QPushButton("🗨️")
-        self.chat_btn.setFixedSize(52, 48)
-        self.chat_btn.clicked.connect(self._on_chat_clicked)
-        layout.addWidget(self.chat_btn)
-        
-        self.setFixedSize(68, 60)
+        self.setFixedSize(self.BTN, self.BTN)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self._hover = False
+        # 失去鼠标焦点 3 秒后自动隐藏，让桌宠恢复点击前状态
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self._on_hide_timeout)
         self.hide()
-    
-    def _on_chat_clicked(self):
-        self.hide()
-        if self.parent():
-            self.parent()._show_chat_dialog()
-    
-    def popup_at(self, x, y):
-        self.move(int(x), int(y))
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(1.5, 1.5, self.BTN - 3, self.BTN - 3)
+        # 圆形底（悬浮时微染品牌蓝）
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 245) if not self._hover else QColor(232, 240, 255, 250))
+        p.drawEllipse(r)
+        p.setPen(QPen(QColor(180, 195, 235, 200), 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(r)
+        # 矢量聊天图标：圆角气泡 + 三圆点（品牌蓝，与发送按钮一致）
+        self._draw_chat_icon(p, QColor(86, 134, 254) if not self._hover else QColor(64, 106, 232))
+
+    def _draw_chat_icon(self, p, color):
+        c = self.BTN / 2.0
+        bw, bh = 19.0, 14.0
+        bx, by = c - bw / 2, c - bh / 2 - 1
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(bx, by, bw, bh), 5.0, 5.0)
+        tail = QPolygonF([QPointF(bx + 3, by + bh - 1),
+                          QPointF(bx + 7.5, by + bh + 3.5),
+                          QPointF(bx + 10, by + bh - 1)])
+        path.addPolygon(tail)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(color)
+        p.drawPath(path.simplified())
+        p.setBrush(QColor(255, 255, 255))
+        for dx in (-4.0, 0.0, 4.0):
+            p.drawEllipse(QPointF(bx + bw / 2 + dx, by + bh / 2 - 1), 1.7, 1.7)
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.hide()
+            if self.parent() is not None:
+                self.parent()._show_chat_dialog()
+        super().mousePressEvent(e)
+
+    def popup_at(self, x, y, hide_after_ms=None):
+        # 夹到屏幕内，避免鱼靠近屏幕边缘时按钮弹出到屏幕外
+        screen = QApplication.screenAt(QPoint(int(x), int(y))) or QApplication.primaryScreen()
+        ag = screen.availableGeometry()
+        px = max(ag.left(), min(int(x), ag.right() - self.width()))
+        py = max(ag.top(), min(int(y), ag.bottom() - self.height()))
+        self.move(px, py)
         self.show()
         self.raise_()
+        # 默认 3 秒；可传入与气泡剩余时间一致的时长，保证同步消失
+        self._restart_hide_timer(hide_after_ms if hide_after_ms else 3000)
+
+    def _restart_hide_timer(self, ms=3000):
+        self._hide_timer.start(ms)
+
+    def _on_hide_timeout(self):
+        # 定时到点即隐藏（不因光标停留而无限推迟），保证 3 秒后一定消失
+        self.hide()
+
+    def hideEvent(self, e):
+        """按钮隐藏后恢复桌宠移动（回到点击前状态）"""
+        self._hide_timer.stop()
+        if self.parent() is not None:
+            self.parent().chat_paused = False
+        super().hideEvent(e)
 
 class FoodPanel(QWidget):
     """双击弹出的喂食面板"""
@@ -329,7 +404,11 @@ class FoodPanel(QWidget):
         self.setStyleSheet("FoodPanel{background:rgba(40,40,60,190);border-radius:14px;}")
 
     def popup_at(self, x, y):
-        self.move(int(x - self.width() / 2), int(y - self.height() - 10))
+        screen = QApplication.screenAt(QPoint(int(x), int(y))) or QApplication.primaryScreen()
+        ag = screen.availableGeometry()
+        px = max(ag.left(), min(int(x - self.width() / 2), ag.right() - self.width()))
+        py = max(ag.top(), min(int(y - self.height() - 10), ag.bottom() - self.height()))
+        self.move(px, py)
         self.show()
         self.raise_()
 
@@ -412,6 +491,8 @@ class PetWindow(QWidget):
         self.drag_start_pos = None
         self.last_line = ""
         self.last_press_pos = None
+        self._dbl_clicked = False  # 双击标志：双击后不再触发单击面板
+        self._press_on_pet = False  # 按下是否发生在鱼身上（防止外部窗口松手误触发单击）
         
         # AI 相关
         self.ds_busy = False
@@ -423,7 +504,7 @@ class PetWindow(QWidget):
         self.chat_paused = False
         
         # 功能列表
-        self.function_panel = FunctionPanel(self)
+        self.chat_button = ChatButton(self)
         self.food_panel = FoodPanel(self.on_food)
         # 单击延迟判定（等双击）：单击=回嘴+弹聊天面板，双击=喂食
         self._click_timer = QTimer(self)
@@ -514,36 +595,45 @@ class PetWindow(QWidget):
         threading.Thread(target=worker, daemon=True).start()
 
     # ---------- 绘制 ----------
+    def _bubble_geometry(self):
+        """计算当前气泡的几何信息（绘制与聊天按钮定位共用）"""
+        now = self.t * TICK / 1000.0
+        if not (self.bubble_text and now < self.bubble_until):
+            return None
+        if self.bubble_inner:
+            bfont = QFont(self.bubble_font)
+            bfont.setItalic(True)
+            bg, fg = QColor(232, 232, 238, 235), QColor(125, 125, 138)
+        else:
+            bfont = QFont(self.bubble_font)
+            bg, fg = QColor(255, 255, 255, 235), QColor(60, 60, 80)
+        fm = QFontMetrics(bfont)
+        max_w = min(240, self.width() - 16)
+        words = self.bubble_text
+        lines = []
+        cur = ""
+        for ch in words:
+            if fm.horizontalAdvance(cur + ch) > max_w - 20:
+                lines.append(cur)
+                cur = ch
+            else:
+                cur += ch
+        lines.append(cur)
+        bw = max(fm.horizontalAdvance(l) for l in lines) + 20
+        bh = len(lines) * fm.height() + 14
+        bx = (self.width() - bw) / 2
+        by = 6.0
+        return (bx, by, bw, bh, lines, fm, bfont, bg, fg)
+
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         now = self.t * TICK / 1000.0
 
-        if self.bubble_text and now < self.bubble_until:
-            if self.bubble_inner:
-                bfont = QFont(self.bubble_font)
-                bfont.setItalic(True)
-                bg, fg = QColor(232, 232, 238, 235), QColor(125, 125, 138)
-            else:
-                bfont = QFont(self.bubble_font)
-                bg, fg = QColor(255, 255, 255, 235), QColor(60, 60, 80)
-            fm = QFontMetrics(bfont)
-            max_w = min(240, self.width() - 16)
-            words = self.bubble_text
-            lines = []
-            cur = ""
-            for ch in words:
-                if fm.horizontalAdvance(cur + ch) > max_w - 20:
-                    lines.append(cur)
-                    cur = ch
-                else:
-                    cur += ch
-            lines.append(cur)
-            bw = max(fm.horizontalAdvance(l) for l in lines) + 20
-            bh = len(lines) * fm.height() + 14
-            bx = (self.width() - bw) / 2
-            by = 6.0
+        g = self._bubble_geometry()
+        if g is not None:
+            bx, by, bw, bh, lines, fm, bfont, bg, fg = g
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(bg)
             p.drawRoundedRect(QRectF(bx, by, bw, bh), 10, 10)
@@ -760,10 +850,11 @@ class PetWindow(QWidget):
     # ---------- 鼠标事件 ----------
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            self._press_on_pet = True
             self.last_press_pos = e.globalPosition().toPoint()
             self.dragging = False
             self.drag_start_pos = e.globalPosition().toPoint()
-            self.function_panel.hide()
+            self.chat_button.hide()
             self.chat_dialog.hide()
             self.chat_paused = True
 
@@ -782,6 +873,8 @@ class PetWindow(QWidget):
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            pressed_on_pet = self._press_on_pet
+            self._press_on_pet = False
             if self.dragging:
                 self.dragging = False
                 self.drag_offset = None
@@ -792,39 +885,63 @@ class PetWindow(QWidget):
                 if random.random() < 0.5:
                     self.say(random.choice(DRAG_LINES))
                 self.chat_paused = False
-            else:
+            elif pressed_on_pet and not self._dbl_clicked:
                 self._click_timer.start(280)  # 等双击判定；单击则回嘴+弹聊天面板
+            self._dbl_clicked = False
             self.last_press_pos = None
             self.drag_start_pos = None
 
     def mouseDoubleClickEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            self._dbl_clicked = True
             self._click_timer.stop()
+            self.chat_paused = False  # 喂食面板不暂停鱼
             self.food_panel.popup_at(self.x() + self.width() / 2, self.y() + BUBBLE_H)
 
+    def _pick_line(self, lines):
+        """选一句与上次不同的台词（避免 say 去重导致气泡不显示）"""
+        cands = [l for l in lines if l != self.last_line]
+        return random.choice(cands) if cands else random.choice(lines)
+
     def _on_single_click(self):
-        """单击：蹦跳回嘴 + 弹聊天面板（两不误，不想聊点鱼身外关闭）"""
+        """单击：蹦跳回嘴 + 气泡右侧弹出聊天按钮（不想聊点鱼身外即可）"""
         if random.random() < 0.7:
             self.jump_t = 1.0
-        if random.random() < 0.6:
-            self.say(random.choice(REACT_LINES))
-        panel = self.function_panel
-        panel.popup_at(self.x() + self.width() / 2 - panel.width() / 2,
-                       self.y() - panel.height() - 10)
+        self.say(self._pick_line(REACT_LINES))  # 必定回嘴，避免"点击没反应"
+        # 按钮隐藏时刻与气泡过期时刻对齐（气泡剩余时间），两者同步消失
+        remaining_ms = int((self.bubble_until - self.t * TICK / 1000.0) * 1000)
+        remaining_ms = max(1000, remaining_ms)  # 至少保留 1 秒点击窗口
+        g = self._bubble_geometry()
+        if g is not None:
+            bx, by, bw, bh = g[:4]
+            # 按钮放在气泡右侧、垂直居中：不遮挡鱼身，也避免对话框弹出时按钮区域被盖住
+            btn_x = self.x() + bx + bw + 6
+            btn_y = self.y() + by + (bh - self.chat_button.height()) / 2
+        else:
+            btn_x = self.x() + self.width() - self.chat_button.width() - 8
+            btn_y = self.y() + 8
+        self.chat_button.popup_at(btn_x, btn_y, hide_after_ms=remaining_ms)
+        self.chat_paused = True  # 按钮交互期间鱼暂停移动
 
     def on_food(self, food):
         self.food_panel.hide()
         self.eat_t = 1.0
         self.jump_t = 0.6
+        self.chat_paused = False  # 喂食后恢复移动
         lines = FOOD_LINES.get(food, ["好吃！"])
         self.say(random.choice(lines))
 
     def _show_chat_dialog(self):
         key = self.cfg.get("ds_api_key", "")
         if not key:
-            self.say("请先在右键菜单里设置 DeepSeek Key！")
+            # 未设置 Key：直接弹出设置框（可输入），设置成功后自动打开聊天
+            self.chat_button.hide()
             self.chat_paused = False
+            self._set_key_dialog()
+            if self.cfg.get("ds_api_key", ""):
+                self._show_chat_dialog()
             return
+        self.chat_paused = True  # 聊天期间鱼暂停移动（关闭对话框后恢复）
         self.chat_dialog.popup_at(
             self.x() + self.width() / 2,
             self.y() + BUBBLE_H
